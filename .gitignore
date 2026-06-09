@@ -1,0 +1,7 @@
+# Built client binary + the engine symlink the launch script creates
+/akshay-chessckers-client
+/akshay-chessckers-0
+/lczero-client
+
+# Downloaded network cache, if the client is run in-tree
+client-cache/

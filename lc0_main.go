@@ -22,7 +22,6 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -31,7 +30,6 @@ import (
 
 	"github.com/LeelaChessZero/lczero-client/src/client"
 
-	"github.com/Tilps/chess"
 	"github.com/gofrs/flock"
 )
 
@@ -48,12 +46,12 @@ var (
 	parallelism32   bool
 	testedDxNet     string
 
-	lc0Exe           = "lc0"
+	lc0Exe           = "akshay-chessckers-0"
 	defaultLocalHost = "Unknown"
 	gpuType          = "Unknown"
 
 	localHost     = flag.String("localhost", "", "Localhost name to send to the server when reporting\n(defaults to Unknown, overridden by the configuration file)")
-	hostname      = flag.String("hostname", "http://api.lczero.org", "Address of the server")
+	hostname      = flag.String("hostname", "http://macbookprom1pro:9830", "Address of the server (tailnet MagicDNS name by default)")
 	networkMirror = flag.String("network-mirror", "", "Alternative url prefix to download networks from.")
 	user          = flag.String("user", "", "Username")
 	password      = flag.String("password", "", "Password")
@@ -64,7 +62,6 @@ var (
 		`Options for the lc0 mux. backend. Example: --backend-opts="cudnn(gpu=1)"`)
 	parallel      = flag.Int("parallelism", -1, "Number of games to play in parallel (-1 for default)")
 	cacheDir      = flag.String("cache", "", "Directory to use for downloaded files cache (if it exists)")
-	useTestServer = flag.Bool("use-test-server", false, "Set host name to test server.")
 	runId         = flag.Uint("run", 0, "Which training run to contribute to (default 0 to let server decide)")
 	keep          = flag.Bool("keep", false, "Do not delete old network files")
 	version       = flag.Bool("version", false, "Print version and exit.")
@@ -238,45 +235,44 @@ func (c *cmdWrapper) openInput() {
 	}
 }
 
+// convertMovesToPGN builds a Chessckers movelog from the engine's move strings.
+//
+// Chessckers moves (diagonal hops, capture chains, deploys, charges) are NOT
+// standard chess SAN/UCI, so there is no chess library that can parse them and
+// no real PGN. We therefore emit the engine's own move tokens space-joined,
+// followed by a result tag and the lc0-style "{OL: N}" opening-length marker.
+// The server stores this verbatim (opaque "pgn" passthrough) for display.
 func convertMovesToPGN(moves []string, result string, start_ply_count int) string {
-	game := chess.NewGame(chess.UseNotation(chess.LongAlgebraicNotation{}))
-	if len(moves) > 6 && moves[len(moves)-7] == "from_fen" {
-		fen := strings.Join(moves[len(moves)-6:], " ")
-		moves = moves[:len(moves)-7]
-		pair := &chess.TagPair{
-			Key:   "FEN",
-			Value: fen,
-		}
-		tagPairs := []*chess.TagPair{pair}
-		fen_func, _ := chess.FEN(fen)
-		game = chess.NewGame(chess.UseNotation(chess.LongAlgebraicNotation{}), fen_func, chess.TagPairs(tagPairs))
-	}
-	for _, m := range moves {
-		err := game.MoveStr(m)
-		if err != nil {
-			log.Fatalf("movstr: %v", err)
+	// The engine appends "from_fen <fen...>" only when the game did not start
+	// from the standard start position (e.g. an opening book). Pull it off the
+	// tail so it doesn't get mixed into the movetext.
+	fen := ""
+	for i, m := range moves {
+		if m == "from_fen" {
+			fen = strings.Join(moves[i+1:], " ")
+			moves = moves[:i]
+			break
 		}
 	}
-	if game.Outcome() == chess.NoOutcome && len(game.EligibleDraws()) > 1 {
-		game.Draw(game.EligibleDraws()[1])
+	resultTag := "1/2-1/2"
+	if result == "whitewon" {
+		resultTag = "1-0"
+	} else if result == "blackwon" {
+		resultTag = "0-1"
 	}
-	game2 := chess.NewGame()
-	b, err := game.MarshalText()
-	if err != nil {
-		log.Fatalf("MarshalText failed: %v", err)
+	var sb strings.Builder
+	if fen != "" {
+		sb.WriteString("[FEN \"")
+		sb.WriteString(fen)
+		sb.WriteString("\"]\n\n")
 	}
-	b_str := string(b)
-	if strings.HasSuffix(b_str, " *") && result != "" {
-		to_append := "1/2-1/2"
-		if result == "whitewon" {
-			to_append = "1-0"
-		} else if result == "blackwon" {
-			to_append = "0-1"
-		}
-		b = []byte(strings.TrimRight(b_str, "*") + to_append)
+	if len(moves) > 0 {
+		sb.WriteString(strings.Join(moves, " "))
+		sb.WriteString(" ")
 	}
-	game2.UnmarshalText(b)
-	return game2.String() + " {OL: " + strconv.Itoa(start_ply_count) + "}"
+	sb.WriteString(resultTag)
+	sb.WriteString(" {OL: " + strconv.Itoa(start_ply_count) + "}")
+	return sb.String()
 }
 
 func createCmdWrapper() *cmdWrapper {
@@ -290,53 +286,15 @@ func createCmdWrapper() *cmdWrapper {
 }
 
 func checkLc0() {
-	cmd := exec.Command(lc0Exe)
-	cmd.Args = append(cmd.Args, "--help")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		log.Fatal(err)
+	cmd := exec.Command(lc0Exe, "--help")
+	if _, err := cmd.CombinedOutput(); err != nil {
+		// Engines may exit non-zero on --help; only fatal if the process could
+		// not start at all (e.g. the binary is missing from the working
+		// directory / PATH).
+		if _, ok := err.(*exec.ExitError); !ok {
+			log.Fatalf("Could not start engine %q: %v", lc0Exe, err)
+		}
 	}
-	if bytes.Contains(out, []byte("eigen")) {
-		hasEigen = true
-	}
-	if bytes.Contains(out, []byte("dx12")) {
-		hasDx = true
-	}
-	if bytes.Contains(out, []byte("cuda-auto")) {
-		hasCuda = true
-		parallelism32 = true
-	}
-	if bytes.Contains(out, []byte("cudnn-auto")) && *cudnn {
-		hasCudnn = true
-		parallelism32 = true
-	}
-	if bytes.Contains(out, []byte("opencl")) {
-		hasOpenCL = true
-	}
-}
-
-func checkDx(networkPath string) {
-	if !hasEigen {
-		log.Fatalf("Dx12 backend cannot be validated")
-	}
-	log.Println("Sanity checking the dx12 driver.")
-	cmd := exec.Command(lc0Exe)
-	sGpu := ""
-	if *gpu >= 0 {
-		sGpu = fmt.Sprintf(",gpu=%v", *gpu)
-	}
-	cmd.Args = append(cmd.Args, "benchmark", "-w", networkPath, "--backend=check")
-	cmd.Args = append(cmd.Args, fmt.Sprintf("--backend-opts=mode=check,freq=1.0,atol=5e-1,dx12%v", sGpu))
-	// Add the startpos fen to get consistent behavior with old and new lc0 benchmark.
-	cmd.Args = append(cmd.Args, "--fen=rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		log.Fatal(err)
-	}
-	if bytes.Contains(out, []byte("*** ERROR check failed")) {
-		log.Fatal("The dx12 backend failed the self check - try updating gpu drivers")
-	}
-	log.Println("The dx12 driver passed the initial sanity check.")
 }
 
 func (c *cmdWrapper) launch(networkPath string, otherNetPath string, args []string, input bool) {
@@ -345,9 +303,10 @@ func (c *cmdWrapper) launch(networkPath string, otherNetPath string, args []stri
 	mode := args[0]
 	c.Cmd.Args = append(c.Cmd.Args, mode)
 	args = args[1:]
-	if mode != "selfplay" {
-		c.Cmd.Args = append(c.Cmd.Args, "--backend=multiplexing")
-	}
+	// The chessckers engine has a single native NN backend (Metal GPU / CPU BLAS,
+	// chosen internally). There is no lc0-style backend autodetect / backend-opts
+	// / dx12 self-check, so we just always select the chessckers backend.
+	c.Cmd.Args = append(c.Cmd.Args, "--backend=chessckers")
 	if *lc0Args != "" {
 		log.Println("WARNING: Option --lc0args is for testing, not production use!")
 		log.SetPrefix("TESTING: ")
@@ -355,41 +314,6 @@ func (c *cmdWrapper) launch(networkPath string, otherNetPath string, args []stri
 		c.Cmd.Args = append(c.Cmd.Args, parts...)
 	}
 	parallelism := *parallel
-	sGpu := ""
-	if *gpu >= 0 {
-		sGpu = fmt.Sprintf(",gpu=%v", *gpu)
-	}
-	// Check the dx12 backend if it is the first time or we changed net, but only if no higher
-	// priority backend is available.
-	if !hasCuda && !hasCudnn && hasDx && testedDxNet != networkPath {
-		checkDx(networkPath)
-		testedDxNet = networkPath
-	}
-	if *backopts != "" {
-		// Check against small token blacklist.
-		tokens := regexp.MustCompile("[,=().0-9]").Split(*backopts, -1)
-		for _, token := range tokens {
-			switch token {
-			case "mlh", "random", "recordreplay", "trivial":
-				log.Fatalf("Not accepted in --backend-opts: %s", token)
-			}
-		}
-		c.Cmd.Args = append(c.Cmd.Args, fmt.Sprintf("--backend-opts=%s", *backopts))
-	} else if hasCudnn {
-		c.Cmd.Args = append(c.Cmd.Args, fmt.Sprintf("--backend-opts=backend=cudnn-auto%v", sGpu))
-		if parallelism <= 0 && parallelism32 {
-			parallelism = 32
-		}
-	} else if hasCuda {
-		c.Cmd.Args = append(c.Cmd.Args, fmt.Sprintf("--backend-opts=backend=cuda-auto%v", sGpu))
-		if parallelism <= 0 && parallelism32 {
-			parallelism = 32
-		}
-	} else if hasDx {
-		c.Cmd.Args = append(c.Cmd.Args, fmt.Sprintf("--backend-opts=check(freq=1e-5,atol=5e-1,dx12%v)", sGpu))
-	} else if hasOpenCL {
-		c.Cmd.Args = append(c.Cmd.Args, fmt.Sprintf("--backend-opts=backend=opencl%v", sGpu))
-	}
 	if parallelism > 0 && mode == "selfplay" {
 		c.Cmd.Args = append(c.Cmd.Args, fmt.Sprintf("--parallelism=%v", parallelism))
 	}
@@ -426,7 +350,7 @@ func (c *cmdWrapper) launch(networkPath string, otherNetPath string, args []stri
 			switch {
 			case strings.HasPrefix(line, "Unknown command line flag"):
 				fmt.Println(line)
-				log.Fatal("You probably have an old lc0 version")
+				log.Fatal("You probably have an old akshay-chessckers-0 version")
 			case strings.Contains(line, "GPU: GeForce GTX 16"):
 				fallthrough // Does not contain "fp16" so the following works fine.
 			case strings.Contains(line, "Switching to"):
@@ -488,7 +412,7 @@ func (c *cmdWrapper) launch(networkPath string, otherNetPath string, args []stri
 			case strings.HasPrefix(line, "bestmove "):
 				//				fmt.Println(line)
 				c.BestMove <- strings.Split(line, " ")[1]
-			case strings.HasPrefix(line, "id name Lc0 "):
+			case strings.HasPrefix(line, "id name akshay-chessckers-0 "):
 				c.Version = strings.Split(line, " ")[3]
 				fmt.Println(line)
 			case strings.HasPrefix(line, "info"):
@@ -762,32 +686,38 @@ func train(httpClient *http.Client, ngr client.NextGameResponse,
 }
 
 func checkValidNetwork(dir string, sha string) (string, error) {
-	// Sha already exists?
+	// The on-wire / on-disk cache format is a GZIPPED net (so the server can
+	// sha256 the decompressed bytes and do delta updates), but the chessckers
+	// engine loads a RAW .bin via a plain ifstream. So we verify the gzip's
+	// decompressed sha and, on success, materialize a decompressed "<sha>.bin"
+	// sibling once and hand THAT path to the engine.
 	path := filepath.Join(dir, sha)
-	_, err := os.Stat(path)
+	rawPath := path + ".bin"
+	if _, err := os.Stat(path); err != nil {
+		return path, err
+	}
+	file, _ := os.Open(path)
+	reader, err := gzip.NewReader(file)
 	if err == nil {
-		file, _ := os.Open(path)
-		reader, err := gzip.NewReader(file)
+		var data []byte
+		data, err = ioutil.ReadAll(reader)
 		if err == nil {
-			var bytes []byte
-			bytes, err = ioutil.ReadAll(reader)
-			sum := sha256.Sum256(bytes)
-			got := fmt.Sprintf("%x", sum)
+			got := fmt.Sprintf("%x", sha256.Sum256(data))
 			if sha != got {
-				text := fmt.Sprintf("sha mismatch want:\n%s\ngot\n%s\n", sha, got)
-				err = errors.New(text)
+				err = fmt.Errorf("sha mismatch want:\n%s\ngot\n%s", sha, got)
+			} else if _, statErr := os.Stat(rawPath); statErr != nil {
+				err = ioutil.WriteFile(rawPath, data, 0644)
 			}
 		}
-		file.Close()
-		if err != nil {
-			fmt.Printf("Deleting invalid network...\n")
-			os.Remove(path)
-			return path, err
-		} else {
-			return path, nil
-		}
 	}
-	return path, err
+	file.Close()
+	if err != nil {
+		fmt.Printf("Deleting invalid network...\n")
+		os.Remove(path)
+		os.Remove(rawPath)
+		return path, err
+	}
+	return rawPath, nil
 }
 
 func removeAllExcept(dir string, sha string, keepTime string) error {
@@ -842,7 +772,7 @@ func makeCacheDir(dir string) string {
 		_, err := os.Stat(userCache)
 		if err == nil {
 			if len(*cacheDir) == 0 {
-				userCache = filepath.Join(userCache, "lc0")
+				userCache = filepath.Join(userCache, "chessckers")
 			}
 			dir = filepath.Join(userCache, dir)
 		}
@@ -1098,13 +1028,6 @@ func nextGame(httpClient *http.Client, count int) error {
 	return errors.New("Unknown game type: " + nextGame.Type)
 }
 
-// Ensure Tilps/chess is new enough.
-func testChessVersion() {
-	if chess.GetLibraryVersion() < 3 {
-		log.Fatal("You need a more recent version of package github.com/Tilps/chess")
-	}
-}
-
 func hideLc0argsFlag() {
 	shown := new(flag.FlagSet)
 	flag.VisitAll(func(f *flag.Flag) {
@@ -1118,23 +1041,8 @@ func hideLc0argsFlag() {
 	}
 }
 
-func maybeSetTrainOnly() {
-	found := false
-	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "train-only" {
-			found = true
-		}
-	})
-	if !found && !hasCudnn && !hasCuda && !hasDx {
-		*trainOnly = true
-		log.Println("Will only run training games, use -train-only=false to override")
-	}
-}
-
 func main() {
-	fmt.Printf("Lc0 client version %v\n", getExtraParams()["version"])
-
-	testChessVersion()
+	fmt.Printf("akshay-chessckers-0 client version %v\n", getExtraParams()["version"])
 
 	hideLc0argsFlag()
 	flag.Parse()
@@ -1144,7 +1052,7 @@ func main() {
 	}
 
 	if runtime.GOOS == "windows" {
-		lc0Exe = "lc0.exe"
+		lc0Exe = "akshay-chessckers-0.exe"
 	}
 	dir, _ := os.Getwd()
 	fi, err := os.Stat(path.Join(dir, lc0Exe))
@@ -1152,8 +1060,6 @@ func main() {
 		lc0Exe = path.Join(dir, lc0Exe)
 	}
 	checkLc0()
-
-	maybeSetTrainOnly()
 
 	// 640 ought to be enough for anybody.
 	if *runId > 640 {
@@ -1167,10 +1073,6 @@ func main() {
 		randId = int(*runId)<<16 | int(randBytes[0])<<8 | int(randBytes[1])
 	}
 
-	if *useTestServer {
-		*hostname = "http://testserver.lczero.org"
-	}
-
 	if len(*networkMirror) == 0 {
 		*networkMirror = *hostname + "/get_network?sha="
 	}
@@ -1178,7 +1080,7 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
 	if len(*settingsPath) == 0 {
-		*settingsPath = "lc0-training-client-config.json"
+		*settingsPath = "chessckers-training-client-config.json"
 		configDir := ""
 		if runtime.GOOS == "linux" {
 			configDir = os.Getenv("XDG_CONFIG_HOME")
@@ -1196,7 +1098,7 @@ func main() {
 		}
 
 		if len(configDir) != 0 {
-			configDir = filepath.Join(configDir, "lc0")
+			configDir = filepath.Join(configDir, "chessckers")
 			_, err = os.Stat(configDir)
 			if os.IsNotExist(err) {
 				err = os.Mkdir(configDir, os.ModePerm)
