@@ -473,7 +473,14 @@ func playMatch(httpClient *http.Client, ngr client.NextGameResponse, baselinePat
 		}
 	}
 	if !hasVisitsParam {
-		params = append(params, "--visits=800")
+		// Self-play search depth per move. Fewer visits => more games/s, which is
+		// what matters when the trainer is generation-bound (idle waiting on games).
+		// Override with CC_VISITS; default 100 (was 200, was 800) for faster game throughput.
+		visits := os.Getenv("CC_VISITS")
+		if visits == "" {
+			visits = "100"
+		}
+		params = append(params, "--visits="+visits)
 	}
 	c := createCmdWrapper()
 	c.launch(candidatePath, baselinePath, params /* input= */, false)

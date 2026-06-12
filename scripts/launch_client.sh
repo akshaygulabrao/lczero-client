@@ -7,8 +7,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SERVER="${SERVER:-http://macbookprom1pro:9830}"
-ENGINE="${ENGINE:-/Users/ox/AAworkspace/akshay-chessckers-0/build/akshay-chessckers-0}"
+SERVER="${SERVER:-http://localhost:9830}"
+ENGINE="${ENGINE:-/Users/ox/AAworkspace/chessckers/akshay-chessckers-0/build/release/akshay-chessckers-0}"
 CC_USER="${CC_USER:-$(whoami)}"
 CC_PASS="${CC_PASS:-chessckers}"
 RUN="${RUN:-1}"
