@@ -7,6 +7,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+if [ "$(uname -s)" = Darwin ] && [ -z "${ON_BOX:-}" ]; then
+  echo "[guard] This script runs on the Vast.ai GPU box, not locally." >&2
+  echo "[guard] Use: python engine/scripts/cc.py <command>" >&2
+  exit 1
+fi
+
 SERVER="${SERVER:-http://localhost:9830}"
 ENGINE="${ENGINE:-/Users/ox/AAworkspace/chessckers/akshay-chessckers-0/build/release/akshay-chessckers-0}"
 CC_USER="${CC_USER:-$(whoami)}"
