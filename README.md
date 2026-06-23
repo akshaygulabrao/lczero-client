@@ -1,123 +1,89 @@
-# Running with Docker
+# lczero-client — Chessckers self-play client
 
-Requires an NVIDIA GPU and driver. The runner script auto-selects the right
-image variant based on what your driver supports, and then watches for updates
-to restart the container.
+Go client that connects to a `lczero-server`, downloads networks, and spawns the
+`akshay-chessckers-0` engine to play self-play games. The engine must be on this
+same machine — the client does **not** run the engine remotely.
 
-- Driver with CUDA >= 12.9 (driver >= 575) -> `cuda12-live`
-- Driver with CUDA >= 11.5 (driver >= 495) -> `cuda11-live`
-
-## Prerequisites
-
-- NVIDIA driver installed (verify: `nvidia-smi`)
-- Docker + NVIDIA Container Toolkit:
-  https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
-
-## Run
+## Quick start
 
 ```bash
-wget https://raw.githubusercontent.com/LeelaChessZero/lczero-client/master/run-lc0-client-in-docker.sh
-bash run-lc0-client-in-docker.sh --user=USER --password=PASS [other flags...]
+# Build the Go client (needs Go ≥1.19)
+go build -o lc0-client .
+
+# Create the engine symlink (REQUIRED — no --engine flag exists)
+mkdir -p .enginebin
+ln -sfT /path/to/akshay-chessckers-0/build/release/akshay-chessckers-0 \
+        .enginebin/akshay-chessckers-0
+
+# Run (engine found via PATH → .enginebin/akshay-chessckers-0)
+./lc0-client -hostname http://your-server:9830 -user vast -password chessckers -run 1
 ```
 
-Or as a one-liner:
+## Flag reference
+
+| Flag | Default | Description |
+|---|---|---|
+| `-hostname` | `http://macbookprom1pro:9830` | Server URL (the only way to set it) |
+| `-user` | (required) | Username for server auth |
+| `-password` | (required) | Password for server auth |
+| `-run` | `0` | Training run ID (0 = server decides) |
+| `-parallelism` | `-1` | Games in flight (`-1` = server decides) |
+| `-gpu` | `-1` | GPU index (`-1` = server decides) |
+| `-config` | — | JSON config file (overrides flags) |
+| `-cache` | `~/.cache/chessckers/client-cache/` | Downloaded nets cache |
+| `-train-only` | `false` | Skip match games, self-play only |
+| `-keep` | `false` | Don't delete old network files |
+| `-report-gpu` | `false` | Send GPU info to server |
+| `-report-host` | `false` | Send hostname to server |
+
+**There is no `--server` or `--engine` flag.** The server URL is `-hostname`.
+The engine is found by `PATH` lookup of `akshay-chessckers-0` — the standard
+pattern is a `.enginebin/` symlink in the client's working directory.
+
+## Directory layout on a GPU box
+
+```
+/workspace/
+├── lczero-client/              # this repo
+│   ├── lc0-client              # built Go binary
+│   ├── .enginebin/
+│   │   └── akshay-chessckers-0 → ../../akshay-chessckers-0/build/release/akshay-chessckers-0
+│   └── scripts/
+│       └── launch_vast_direct.sh  # launch in persistent tmux
+├── akshay-chessckers-0/        # the engine fork
+│   └── build/release/akshay-chessckers-0
+├── lczero-server/              # server + trainer
+│   └── cc-server
+└── engine/                     # Python (trainer, rules, analysis)
+    └── chessckers_engine/
+```
+
+## Launch scripts (for vast.ai boxes)
+
+| Script | Where it runs | What it does |
+|---|---|---|
+| `scripts/launch_vast_direct.sh` | From your Mac → box | Launches client in a detached `tmux cc-client` session. Needs `VAST_HOST`, `VAST_PORT`, `SERVER` env vars. |
+| `scripts/launch_client.sh` | On the box | Simple foreground launch (for tailnet setups) |
+| `scripts/provision_vast.sh` | From your Mac → box | One-time: cross-compiles client, rsyncs engine source, builds engine with CUDA |
+
+## Persistent launch (tmux, survives ssh drops)
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/LeelaChessZero/lczero-client/master/run-lc0-client-in-docker.sh) --user=USER --password=PASS [other flags...]
+# On the box:
+CLIENT_DIR=/workspace/chessckers/lczero-client
+tmux new-session -d -s cc-client -n selfplay -c "$CLIENT_DIR"
+tmux send-keys -t cc-client \
+  "export PATH=$CLIENT_DIR/.enginebin:\$PATH; cd $CLIENT_DIR; ./lc0-client -hostname http://localhost:10100 -user vast -password chessckers -run 1 -parallelism 32 2>&1 | tee -a client.log" C-m
 ```
 
-## Multiple GPUs
+## Troubleshooting
 
-To run on a specific GPU, use `--gpu=N` (default: `--gpu=0`). This is the
-only way to select a GPU — do not use `--backend-opts` for GPU selection.
+**Client shows `--help` output → flag rejected.** Check flag spelling:
+`-hostname` (not `--server`), `-user` (not `--username`), `-parallelism` (not `--parallel`).
 
-Run one instance per GPU:
+**Engine not found.** Verify `.enginebin/akshay-chessckers-0` is a symlink to
+the actual binary. The client spawns `akshay-chessckers-0 selfplay --backend=chessckers ...`.
 
-```bash
-bash run-lc0-client-in-docker.sh --gpu=0 --user=USER --password=PASS &
-bash run-lc0-client-in-docker.sh --gpu=1 --user=USER --password=PASS &
-```
-
-Config persists in `lc0-training-client-config.json` in the current directory.
-
-# Compiling
-
-You will need to install Go 1.9 or later.
-
-Then, make sure to set up your GOPATH properly, eg. here is mine:
-```
-export GOPATH=${HOME}/go:${HOME}/src/lczero-client
-```
-Here, I've set my system install of go as the first entry, and then the lczero-client directory as the second.
-
-Pre-reqs:
-```
-# (Bug workaround, using Tilps instead)
-# go get -u github.com/notnil/chess
-go get -u github.com/Tilps/chess
-go get -u github.com/nightlyone/lockfile
-
-```
-
-Pull or download the `master` branch
-
-Then to produce a `lczero-client` executable:
-`go build lc0_main.go` for the `lc0` client
-
-If you get
-`.\lc0_main.go:1048:5: undefined: chess.GetLibraryVersion`
-you have a cached old version of Tilps/chess and need to run the Pre-reqs again.
-
-# Running
-
-First copy the `lc0` executable into the same folder as the `lczero-client` executable.
-
-Then, run!  Username and password are required parameters.
-```
-./lczero-client --user=myusername --password=mypassword
-```
-
-For testing, you can also point the client at a different server:
-```
-./lczero-client --hostname=http://127.0.0.1:8080 --user=test --password=asdf
-```
-
-# Cross-compiling
-
-One of the main reasons I picked go was it's amazing support for cross-compiling.
-
-Pre-reqs:
-```
-GOOS=windows GOARCH=amd64 go install
-GOOS=darwin GOARCH=amd64 go install
-GOOS=linux GOARCH=amd64 go install
-```
-
-Building the client for each platform:
-```
-GOOS=windows GOARCH=amd64 go build -o lczero-client.exe
-GOOS=darwin GOARCH=amd64 go build -o lczero-client_mac
-GOOS=linux GOARCH=amd64 go build -o lczero-client_linux
-```
-
-
-# Go module support 
-
-Dependend go modules were added by executing:
-
-```
-go get 'github.com/Tilps/chess@master'    
-```
-
-gives something like:
-```
-go: downloading github.com/Tilps/chess v0.0.0-20200409092358-c35715299813
-go: github.com/Tilps/chess master => v0.0.0-20200409092358-c35715299813
-```
-
-This version number can then be used in the `go.mod` file
-
-Whenever you want to update the version do the above `go get` step and there will be a new version number generated that you can put in the existing `go.mod` file.
-
-Just use the command `go mod download` to update go's module cache.
-building should work with `go build lc0_main.go`
+**Engine fails to load the net.** The server must have published at least one
+network. Check `curl http://server:port/` — it should return the server's
+JSON status. The client downloads nets to `~/.cache/chessckers/client-cache/`.
