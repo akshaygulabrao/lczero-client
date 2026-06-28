@@ -49,7 +49,7 @@ pattern is a `.enginebin/` symlink in the client's working directory.
 │   ├── .enginebin/
 │   │   └── akshay-chessckers-0 → ../../akshay-chessckers-0/build/release/akshay-chessckers-0
 │   └── scripts/
-│       └── launch_vast_direct.sh  # launch in persistent tmux
+│       └── launch_client.sh       # manual foreground launch (or use `cc fresh-run`)
 ├── akshay-chessckers-0/        # the engine fork
 │   └── build/release/akshay-chessckers-0
 ├── lczero-server/              # server + trainer
@@ -58,13 +58,15 @@ pattern is a `.enginebin/` symlink in the client's working directory.
     └── chessckers_engine/
 ```
 
-## Launch scripts (for vast.ai boxes)
+## Launch scripts
 
-| Script | Where it runs | What it does |
-|---|---|---|
-| `scripts/launch_vast_direct.sh` | From your Mac → box | Launches client in a detached `tmux cc-client` session. Needs `VAST_HOST`, `VAST_PORT`, `SERVER` env vars. |
-| `scripts/launch_client.sh` | On the box | Simple foreground launch (for tailnet setups) |
-| `scripts/provision_vast.sh` | From your Mac → box | One-time: cross-compiles client, rsyncs engine source, builds engine with CUDA |
+Provisioning + launch is automated by **`cc fresh-run`** (single-box) from the
+chessckers repo. For a manual launch use the tmux snippet under *Persistent
+launch* below, or `scripts/launch_client.sh` for a simple foreground run.
+
+> The old two-box vast scripts (`launch_vast*.sh`, `provision_vast.sh`) were
+> removed — they targeted a separate client-only box layout that is no longer
+> used.
 
 ## Persistent launch (tmux, survives ssh drops)
 
