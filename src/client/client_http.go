@@ -77,17 +77,19 @@ func BuildUploadRequest(uri string, params map[string]string, paramName, path st
 }
 
 type NextGameResponse struct {
-	Type         string
-	TrainingId   uint
-	NetworkId    uint
-	Sha          string
-	CandidateSha string
-	Params       string
-	Flip         bool
-	MatchGameId  uint
-	KeepTime     string
-	BookUrl      string
-	BookSha      string
+	Type           string
+	TrainingId     uint
+	NetworkId      uint
+	Sha            string
+	CandidateSha   string
+	Params         string
+	Flip           bool
+	MatchGameId    uint
+	KeepTime       string
+	BookUrl        string
+	BookSha        string
+	LeaguePool     []string
+	LeagueFraction float64
 }
 
 func NextGame(httpClient *http.Client, hostname string, params map[string]string) (NextGameResponse, error) {

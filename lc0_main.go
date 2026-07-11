@@ -143,7 +143,8 @@ func getExtraParams() map[string]string {
 }
 
 func uploadGame(httpClient *http.Client, path string, pgn string,
-	nextGame client.NextGameResponse, version string, fp_threshold float64) error {
+	nextGame client.NextGameResponse, version string, fp_threshold float64,
+	opponentSha string) error {
 
 	var retryCount uint32
 
@@ -160,6 +161,9 @@ func uploadGame(httpClient *http.Client, path string, pgn string,
 		extraParams["engineVersion"] = version
 		if fp_threshold >= 0.0 {
 			extraParams["fp_threshold"] = strconv.FormatFloat(fp_threshold, 'E', -1, 64)
+		}
+		if opponentSha != "" {
+			extraParams["opponent_sha"] = opponentSha
 		}
 		request, err := client.BuildUploadRequest(*hostname+"/upload_game", extraParams, "file", path)
 		if err != nil {
@@ -215,6 +219,8 @@ type gameInfo struct {
 	fp_threshold float64
 	player1      string
 	result       string
+	// Index into the league pool (--league-weights order); -1 = self-play.
+	opponentIdx int
 }
 
 type cmdWrapper struct {
@@ -404,10 +410,20 @@ func (c *cmdWrapper) launch(networkPath string, otherNetPath string, args []stri
 				if idx6 >= 0 {
 					start_ply_count, err = strconv.Atoi(line[idx6+15 : idx4-1])
 				}
+				opponentIdx := -1
+				if idxO := strings.Index(line, " opponent "); idxO >= 0 && idxO < idx6 {
+					// Token sits between "gameid N" and "play_start_ply"; anything
+					// matching later in the line (moves/fen) is not our token.
+					if f := strings.Fields(line[idxO+10:]); len(f) > 0 {
+						if v, err2 := strconv.Atoi(f[0]); err2 == nil {
+							opponentIdx = v
+						}
+					}
+				}
 				file := line[idx1+13 : idx2-1]
 				pgn := convertMovesToPGN(strings.Split(line[idx3+6:len(line)], " "), result, start_ply_count)
 				fmt.Printf("PGN: %s\n", pgn)
-				c.gi <- gameInfo{pgn: pgn, fname: file, fp_threshold: last_fp_threshold, player1: player, result: result}
+				c.gi <- gameInfo{pgn: pgn, fname: file, fp_threshold: last_fp_threshold, player1: player, result: result, opponentIdx: opponentIdx}
 				last_fp_threshold = -1.0
 			case strings.HasPrefix(line, "bestmove "):
 				//				fmt.Println(line)
@@ -621,7 +637,7 @@ func playMatch(httpClient *http.Client, ngr client.NextGameResponse, baselinePat
 }
 
 func train(httpClient *http.Client, ngr client.NextGameResponse,
-	networkPath string, otherNetPath string, count int, params []string, doneCh chan bool) error {
+	networkPath string, otherNetPath string, leagueShas []string, count int, params []string, doneCh chan bool) error {
 	// lc0 needs selfplay first in the argument list.
 	params = append([]string{"selfplay"}, params...)
 	params = append(params, "--training=true")
@@ -669,9 +685,13 @@ func train(httpClient *http.Client, ngr client.NextGameResponse,
 			progressOrKill = true
 			trainDirHolder[0] = path.Dir(gi.fname)
 			log.Printf("trainDir=%s", trainDirHolder[0])
+			opponentSha := ""
+			if gi.opponentIdx >= 0 && gi.opponentIdx < len(leagueShas) {
+				opponentSha = leagueShas[gi.opponentIdx]
+			}
 			wg.Add(1)
 			go func() {
-				uploadGame(httpClient, gi.fname, gi.pgn, ngr, c.Version, gi.fp_threshold)
+				uploadGame(httpClient, gi.fname, gi.pgn, ngr, c.Version, gi.fp_threshold, opponentSha)
 				wg.Done()
 			}()
 		}
@@ -992,6 +1012,20 @@ func nextGame(httpClient *http.Client, count int) error {
 				return err
 			}
 		}
+		var leaguePaths, leagueShas []string
+		for _, sha := range nextGame.LeaguePool {
+			p, err := getNetwork(httpClient, sha, inf)
+			if err != nil {
+				return err
+			}
+			leaguePaths = append(leaguePaths, p)
+			leagueShas = append(leagueShas, sha)
+		}
+		if len(leaguePaths) > 0 {
+			serverParams = append(serverParams,
+				"--league-weights="+strings.Join(leaguePaths, ","),
+				fmt.Sprintf("--league-fraction=%v", nextGame.LeagueFraction))
+		}
 		doneCh := make(chan bool)
 		go func() {
 			defer close(doneCh)
@@ -1010,12 +1044,17 @@ func nextGame(httpClient *http.Client, count int) error {
 					}
 					return
 				}
-				if ng.Type != nextGame.Type || ng.Sha != nextGame.Sha {
+				if ng.Type != nextGame.Type || ng.Sha != nextGame.Sha ||
+					ng.LeagueFraction != nextGame.LeagueFraction ||
+					strings.Join(ng.LeaguePool, ",") != strings.Join(nextGame.LeaguePool, ",") {
 					// Prefetch the next net before terminating game.
 					if ng.Type == "match" {
 						getNetwork(httpClient, ng.CandidateSha, inf)
 					} else {
 						getNetwork(httpClient, ng.Sha, inf)
+						for _, sha := range ng.LeaguePool {
+							getNetwork(httpClient, sha, inf)
+						}
 					}
 					pendingNextGame = &ng
 					return
@@ -1023,7 +1062,7 @@ func nextGame(httpClient *http.Client, count int) error {
 				errCount = 0
 			}
 		}()
-		err = train(httpClient, nextGame, networkPath, otherNetPath, count, serverParams, doneCh)
+		err = train(httpClient, nextGame, networkPath, otherNetPath, leagueShas, count, serverParams, doneCh)
 		// Ensure the anonymous function stops retrying.
 		nextGame.Type = "Done"
 		if err != nil {
