@@ -142,9 +142,19 @@ func getExtraParams() map[string]string {
 	}
 }
 
+// joinFloats renders league PFSP probs exactly as handed to the engine, so
+// the 60s restart check compares what the engine actually got.
+func joinFloats(fs []float64) string {
+	ss := make([]string, len(fs))
+	for i, f := range fs {
+		ss[i] = strconv.FormatFloat(f, 'g', -1, 64)
+	}
+	return strings.Join(ss, ",")
+}
+
 func uploadGame(httpClient *http.Client, path string, pgn string,
 	nextGame client.NextGameResponse, version string, fp_threshold float64,
-	opponentSha string) error {
+	opponentSha string, player1 string, result string) error {
 
 	var retryCount uint32
 
@@ -164,6 +174,14 @@ func uploadGame(httpClient *http.Client, path string, pgn string,
 		}
 		if opponentSha != "" {
 			extraParams["opponent_sha"] = opponentSha
+		}
+		// Game outcome + learner color (gameready tokens, verbatim). Feeds
+		// the server's league PFSP win rates; absent on undecided games.
+		if player1 != "" {
+			extraParams["player1"] = player1
+		}
+		if result != "" {
+			extraParams["result"] = result
 		}
 		request, err := client.BuildUploadRequest(*hostname+"/upload_game", extraParams, "file", path)
 		if err != nil {
@@ -691,7 +709,7 @@ func train(httpClient *http.Client, ngr client.NextGameResponse,
 			}
 			wg.Add(1)
 			go func() {
-				uploadGame(httpClient, gi.fname, gi.pgn, ngr, c.Version, gi.fp_threshold, opponentSha)
+				uploadGame(httpClient, gi.fname, gi.pgn, ngr, c.Version, gi.fp_threshold, opponentSha, gi.player1, gi.result)
 				wg.Done()
 			}()
 		}
@@ -1025,6 +1043,14 @@ func nextGame(httpClient *http.Client, count int) error {
 			serverParams = append(serverParams,
 				"--league-weights="+strings.Join(leaguePaths, ","),
 				fmt.Sprintf("--league-fraction=%v", nextGame.LeagueFraction))
+			if len(nextGame.LeagueProbs) == len(leaguePaths) {
+				// PFSP: server-computed sampling probs, aligned with the pool.
+				serverParams = append(serverParams,
+					"--league-probs="+joinFloats(nextGame.LeagueProbs))
+			} else if len(nextGame.LeagueProbs) > 0 {
+				log.Printf("league: probs/pool size mismatch (%d vs %d), engine will sample uniformly",
+					len(nextGame.LeagueProbs), len(leaguePaths))
+			}
 		}
 		doneCh := make(chan bool)
 		go func() {
@@ -1046,7 +1072,8 @@ func nextGame(httpClient *http.Client, count int) error {
 				}
 				if ng.Type != nextGame.Type || ng.Sha != nextGame.Sha ||
 					ng.LeagueFraction != nextGame.LeagueFraction ||
-					strings.Join(ng.LeaguePool, ",") != strings.Join(nextGame.LeaguePool, ",") {
+					strings.Join(ng.LeaguePool, ",") != strings.Join(nextGame.LeaguePool, ",") ||
+					joinFloats(ng.LeagueProbs) != joinFloats(nextGame.LeagueProbs) {
 					// Prefetch the next net before terminating game.
 					if ng.Type == "match" {
 						getNetwork(httpClient, ng.CandidateSha, inf)

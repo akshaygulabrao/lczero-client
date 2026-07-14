@@ -90,6 +90,9 @@ type NextGameResponse struct {
 	BookSha        string
 	LeaguePool     []string
 	LeagueFraction float64
+	// PFSP sampling probabilities aligned with LeaguePool (absent/empty on
+	// servers without league.pfsp — engine then samples uniformly).
+	LeagueProbs []float64
 }
 
 func NextGame(httpClient *http.Client, hostname string, params map[string]string) (NextGameResponse, error) {
